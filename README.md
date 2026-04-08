@@ -1,85 +1,140 @@
-# Top-down CoTracker → DeepLabCut pipeline
+# User Manual: Remote-GPU CoTracker with Local Interaction (Top-Down + Keypoint-Only)
 
-This repo now supports a **top-down workflow** for your 2 identical DaVinci tools:
+This project is structured for your requirement:
 
-1. Pick a frame range to track.
-2. Define one bounding box per tool (left/right).
-3. Define named keypoints per tool.
-4. Track both tool boxes and keypoints with CoTracker.
-5. Export DeepLabCut labels for training.
+- **Local interaction** (GUI): choose frame range, define boxes/keypoints, name points.
+- **Remote GPU execution** (SLURM/headless): run CoTracker using saved annotation JSON.
+- **DeepLabCut-ready exports**: CSV + H5 labels (and tool box tracks in top-down mode).
 
-## Files
+---
 
-- `topdown_cotracker_dlc.py` (main pipeline)
-- `run_topdown_cotracker.slurm` (SLURM submit script)
-- `cotracker_dlc_tool.py` (previous simpler interactive script)
+## 1) Which script should I use?
 
-## Install
+### A) Top-down workflow (recommended for your two DaVinci tools)
+- Script: `topdown_cotracker_dlc.py`
+- Strategy: **track tool boxes first (via box corners), then keypoints**.
+- Output: `*_dlc_labels.csv`, `*_dlc_labels.h5`, and `*_tool_boxes.csv`.
+
+### B) Keypoint-only workflow
+- Script: `cotracker_dlc_tool.py`
+- Strategy: track only manually selected keypoints.
+- Output: `*_dlc_labels.csv`, `*_dlc_labels.h5`.
+
+---
+
+## 2) Install
 
 ```bash
 pip install numpy pandas opencv-python torch
 pip install git+https://github.com/facebookresearch/co-tracker.git
 ```
 
-## Step A: Build / save annotations (interactive)
+---
 
-Run this on a machine with display access:
+## 3) Top-down workflow (local annotate → remote GPU track)
+
+## Step 3.1: Local interactive annotation
+Run on a machine with display (your laptop/workstation):
 
 ```bash
-python topdown_cotracker_dlc.py \
-  --video /path/endoscope.mp4 \
-  --save-annotation-json /path/annotations.json \
-  --outdir /tmp/dry_run_outputs
+python topdown_cotracker_dlc.py annotate \
+  --video /path/endoscope_video.mp4 \
+  --annotations-out /path/topdown_annotations.json
 ```
 
-This writes `annotations.json` containing:
-- `frame_start`, `frame_end`
-- `boxes` (`tool_left`, `tool_right`)
-- named keypoints (`name`, `x`, `y`, `tool`)
+What you do interactively:
+1. Select frame range.
+2. Draw 2 boxes (`tool_left`, `tool_right`).
+3. Click and name keypoints per tool.
 
-## Step B: Run as SLURM job (non-interactive)
+This creates `topdown_annotations.json`.
+
+## Step 3.2: Submit headless GPU tracking with SLURM
 
 ```bash
 sbatch run_topdown_cotracker.slurm \
-  /path/endoscope.mp4 \
-  /path/annotations.json \
+  /path/topdown_annotations.json \
   /path/output_dir
 ```
 
-Environment variable override:
+Optional video override (if cluster path differs from local path):
+
+```bash
+sbatch run_topdown_cotracker.slurm \
+  /path/topdown_annotations.json \
+  /path/output_dir \
+  /cluster/path/endoscope_video.mp4
+```
+
+Optional scorer name:
 
 ```bash
 SCORER=surgeon1 sbatch run_topdown_cotracker.slurm ...
 ```
 
-## Outputs
+---
 
-For `video.mp4`, generated files include:
+## 4) Keypoint-only workflow (local annotate → remote GPU track)
 
-- `video_dlc_labels.csv` (DLC MultiIndex labels)
-- `video_dlc_labels.h5` (DLC `df_with_missing` table)
-- `video_tool_boxes.csv` (top-down tracked bounding boxes per frame/tool)
+## Step 4.1: Local interactive annotation
 
-## Training DeepLabCut from this output
+```bash
+python cotracker_dlc_tool.py annotate \
+  --video /path/endoscope_video.mp4 \
+  --annotations-out /path/keypoints_annotations.json
+```
 
-1. Create a DLC project.
-2. Put your video frames under DLC `labeled-data/<video_name>/` if needed.
-3. Place the generated `*_dlc_labels.csv` (or `.h5`) into the project label structure.
-4. Ensure bodypart names match your intended keypoint schema.
-5. Run the normal DLC pipeline:
+## Step 4.2: Remote headless tracking
+
+```bash
+python cotracker_dlc_tool.py track \
+  --annotations-json /path/keypoints_annotations.json \
+  --video /cluster/path/endoscope_video.mp4 \
+  --outdir /path/output_dir \
+  --scorer surgeon1
+```
+
+---
+
+## 5) Output reference
+
+### Top-down outputs
+- `<video>_dlc_labels.csv`
+- `<video>_dlc_labels.h5`
+- `<video>_tool_boxes.csv`
+
+### Keypoint-only outputs
+- `<video>_dlc_labels.csv`
+- `<video>_dlc_labels.h5`
+
+Both DLC label outputs follow MultiIndex columns:
+- `scorer`
+- `bodyparts`
+- `coords` = `x`, `y`, `likelihood`
+
+---
+
+## 6) DeepLabCut training quickstart
+
+1. Create/configure your DLC project.
+2. Ensure labeled frame index paths align with DLC project structure:
+   - `labeled-data/<video_name>/imgXXXXXX.png`
+3. Use the generated `*_dlc_labels.csv` or `*_dlc_labels.h5` in your project.
+4. Train/evaluate:
 
 ```python
 import deeplabcut
 
-config = "/path/to/project/config.yaml"
-
+config = "/path/to/config.yaml"
 deeplabcut.create_training_dataset(config)
 deeplabcut.train_network(config)
 deeplabcut.evaluate_network(config)
 ```
 
-## Notes
+---
 
-- The top-down design is implemented by tracking **box corners first**, then keypoints.
-- Tool box trajectories are exported separately to `*_tool_boxes.csv`.
-- For SLURM jobs, use `--annotation-json` to avoid any GUI interaction.
+## 7) Practical notes for remote clusters
+
+- Annotation JSON is the contract between local GUI and remote GPU runs.
+- If local/remote video paths differ, use `--video` override in `track` mode.
+- SLURM script is **tracking-only** (no GUI), so it is safe for headless GPU nodes.

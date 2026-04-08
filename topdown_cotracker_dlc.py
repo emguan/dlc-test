@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Top-down CoTracker pipeline for two DaVinci tools.
-
-Workflow:
-1) Select frame range.
-2) Select one bounding box per tool on first frame (or load from JSON).
-3) Select named keypoints per tool (or load from JSON).
-4) Track box corners + keypoints via CoTracker.
-5) Export DeepLabCut-compatible keypoint labels and per-tool box tracks.
-"""
+"""Top-down CoTracker pipeline with split local-annotation and remote-GPU tracking modes."""
 
 from __future__ import annotations
 
@@ -34,43 +26,42 @@ class NamedPoint:
 def read_video_info(video_path: Path) -> Tuple[int, int, int, float]:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise RuntimeError(f"Unable to open video: {video_path}")
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = float(cap.get(cv2.CAP_PROP_FPS))
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    data = (
+        int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+        int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+        int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        float(cap.get(cv2.CAP_PROP_FPS)),
+    )
     cap.release()
-    return frame_count, width, height, fps
+    return data
 
 
-def load_video_range(video_path: Path, start_frame: int, end_frame: int) -> np.ndarray:
+def load_video_range(video_path: Path, start: int, end: int) -> np.ndarray:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise RuntimeError(f"Unable to open video: {video_path}")
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
     frames: List[np.ndarray] = []
-    for _ in range(end_frame - start_frame + 1):
+    for _ in range(end - start + 1):
         ok, frame = cap.read()
         if not ok:
             break
         frames.append(frame)
     cap.release()
     if not frames:
-        raise RuntimeError("No frames loaded from selected range")
+        raise RuntimeError("No frames loaded for selected range")
     return np.stack(frames, axis=0)
 
 
 def select_frame_range(video_path: Path, frame_count: int) -> Tuple[int, int]:
     cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Unable to open video: {video_path}")
-
-    window = "Frame range (q/Enter confirm)"
+    window = "Top-down: select frame range (q/Enter confirm)"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     cv2.createTrackbar("Start", window, 0, frame_count - 1, lambda _: None)
     cv2.createTrackbar("End", window, frame_count - 1, frame_count - 1, lambda _: None)
 
-    prev = (-1, -1)
+    last = (-1, -1)
     while True:
         start = cv2.getTrackbarPos("Start", window)
         end = cv2.getTrackbarPos("End", window)
@@ -78,7 +69,7 @@ def select_frame_range(video_path: Path, frame_count: int) -> Tuple[int, int]:
             end = start
             cv2.setTrackbarPos("End", window, end)
 
-        if (start, end) != prev:
+        if (start, end) != last:
             cap.set(cv2.CAP_PROP_POS_FRAMES, start)
             ok1, f1 = cap.read()
             cap.set(cv2.CAP_PROP_POS_FRAMES, end)
@@ -87,7 +78,7 @@ def select_frame_range(video_path: Path, frame_count: int) -> Tuple[int, int]:
                 cv2.putText(f1, f"START {start}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 cv2.putText(f2, f"END {end}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 cv2.imshow(window, np.vstack([f1, f2]))
-            prev = (start, end)
+            last = (start, end)
 
         key = cv2.waitKey(30) & 0xFF
         if key in (ord("q"), 13):
@@ -97,97 +88,101 @@ def select_frame_range(video_path: Path, frame_count: int) -> Tuple[int, int]:
         if key == 27:
             cv2.destroyWindow(window)
             cap.release()
-            raise RuntimeError("Aborted")
+            raise RuntimeError("Aborted by user")
 
 
 def select_tool_boxes(frame: np.ndarray) -> Dict[str, Tuple[float, float, float, float]]:
-    cv2.namedWindow("Select two tool boxes", cv2.WINDOW_NORMAL)
-    rois = cv2.selectROIs("Select two tool boxes", frame, fromCenter=False, showCrosshair=True)
-    cv2.destroyWindow("Select two tool boxes")
+    cv2.namedWindow("Select 2 tool boxes", cv2.WINDOW_NORMAL)
+    rois = cv2.selectROIs("Select 2 tool boxes", frame, fromCenter=False, showCrosshair=True)
+    cv2.destroyWindow("Select 2 tool boxes")
     if len(rois) != 2:
-        raise RuntimeError("Please select exactly 2 tool boxes.")
-    boxes = {
+        raise RuntimeError("Select exactly two boxes (tool_left, tool_right)")
+    return {
         "tool_left": tuple(float(v) for v in rois[0]),
         "tool_right": tuple(float(v) for v in rois[1]),
     }
-    return boxes
 
 
-def _pick_named_points_for_tool(frame: np.ndarray, tool_name: str, box: Tuple[float, float, float, float]) -> List[NamedPoint]:
+def _pick_points_tool(frame: np.ndarray, tool: str, box: Tuple[float, float, float, float]) -> List[NamedPoint]:
     x, y, w, h = [int(v) for v in box]
     crop = frame[y : y + h, x : x + w].copy()
     points: List[NamedPoint] = []
-    window = f"{tool_name}: click keypoints (q/Enter done, u undo)"
-    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    win = f"{tool}: click points (q/Enter done, u undo)"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 
     def redraw() -> None:
         vis = crop.copy()
         for i, p in enumerate(points):
             cx, cy = int(p.x - x), int(p.y - y)
             cv2.circle(vis, (cx, cy), 4, (255, 255, 0), -1)
-            cv2.putText(vis, f"{i}:{p.name}", (cx + 6, cy - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-        cv2.imshow(window, vis)
+            cv2.putText(vis, f"{i}:{p.name}", (cx + 5, cy - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        cv2.imshow(win, vis)
 
-    def on_mouse(event, mx, my, flags, param):
+    def on_mouse(event, mx, my, _flags, _param):
         if event == cv2.EVENT_LBUTTONDOWN:
             gx, gy = x + mx, y + my
-            name = input(f"{tool_name} point name @ ({gx}, {gy}) [blank=auto]: ").strip()
+            name = input(f"{tool} point at ({gx},{gy}) name [blank=auto]: ").strip()
             if not name:
-                name = f"{tool_name}_pt_{len(points):02d}"
-            points.append(NamedPoint(name=name, x=float(gx), y=float(gy), tool=tool_name))
+                name = f"{tool}_pt_{len(points):02d}"
+            points.append(NamedPoint(name=name, x=float(gx), y=float(gy), tool=tool))
             redraw()
 
-    cv2.setMouseCallback(window, on_mouse)
+    cv2.setMouseCallback(win, on_mouse)
     redraw()
 
     while True:
         key = cv2.waitKey(30) & 0xFF
         if key in (ord("q"), 13):
             if not points:
-                print(f"Pick at least one keypoint for {tool_name}")
+                print(f"Need at least one point for {tool}")
                 continue
-            cv2.destroyWindow(window)
+            cv2.destroyWindow(win)
             return points
         if key == ord("u") and points:
             points.pop()
             redraw()
         if key == 27:
-            cv2.destroyWindow(window)
-            raise RuntimeError("Aborted")
+            cv2.destroyWindow(win)
+            raise RuntimeError("Aborted by user")
 
 
-def select_tool_keypoints(frame: np.ndarray, boxes: Dict[str, Tuple[float, float, float, float]]) -> List[NamedPoint]:
+def select_points(frame: np.ndarray, boxes: Dict[str, Tuple[float, float, float, float]]) -> List[NamedPoint]:
     pts: List[NamedPoint] = []
-    for tool_name, box in boxes.items():
-        pts.extend(_pick_named_points_for_tool(frame, tool_name, box))
+    for tool, box in boxes.items():
+        pts.extend(_pick_points_tool(frame, tool, box))
     return pts
+
+
+def save_annotations(path: Path, video: Path, frame_start: int, frame_end: int, boxes, points: List[NamedPoint]) -> None:
+    payload = {
+        "video": str(video),
+        "frame_start": int(frame_start),
+        "frame_end": int(frame_end),
+        "boxes": boxes,
+        "points": [{"name": p.name, "x": p.x, "y": p.y, "tool": p.tool} for p in points],
+    }
+    path.write_text(json.dumps(payload, indent=2))
+
+
+def load_annotations(path: Path):
+    data = json.loads(path.read_text())
+    boxes = {k: tuple(v) for k, v in data["boxes"].items()}
+    points = [NamedPoint(name=p["name"], x=float(p["x"]), y=float(p["y"]), tool=p["tool"]) for p in data["points"]]
+    return Path(data["video"]), int(data["frame_start"]), int(data["frame_end"]), boxes, points
 
 
 def corners_from_box(box: Tuple[float, float, float, float]) -> np.ndarray:
     x, y, w, h = box
-    return np.array(
-        [
-            [x, y],
-            [x + w, y],
-            [x + w, y + h],
-            [x, y + h],
-        ],
-        dtype=np.float32,
-    )
+    return np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], dtype=np.float32)
 
 
-def run_cotracker(frames_bgr: np.ndarray, queries_xy: np.ndarray, use_cuda: bool) -> Tuple[np.ndarray, np.ndarray, str]:
-    try:
-        from cotracker.predictor import CoTrackerPredictor
-    except Exception as exc:
-        raise RuntimeError(
-            "CoTracker import failed. Install with: pip install git+https://github.com/facebookresearch/co-tracker.git"
-        ) from exc
+def run_cotracker(clip_bgr: np.ndarray, qxy: np.ndarray, force_cpu: bool) -> Tuple[np.ndarray, np.ndarray, str]:
+    from cotracker.predictor import CoTrackerPredictor
 
-    device = "cuda" if use_cuda and torch.cuda.is_available() else "cpu"
-    video_rgb = frames_bgr[..., ::-1].copy()
+    device = "cpu" if force_cpu else ("cuda" if torch.cuda.is_available() else "cpu")
+    video_rgb = clip_bgr[..., ::-1].copy()
     video = torch.from_numpy(video_rgb).permute(0, 3, 1, 2).unsqueeze(0).float().to(device)
-    q = np.concatenate([np.zeros((queries_xy.shape[0], 1), dtype=np.float32), queries_xy], axis=1)
+    q = np.concatenate([np.zeros((qxy.shape[0], 1), dtype=np.float32), qxy], axis=1)
     queries = torch.from_numpy(q).unsqueeze(0).to(device)
 
     model = CoTrackerPredictor().to(device)
@@ -197,130 +192,105 @@ def run_cotracker(frames_bgr: np.ndarray, queries_xy: np.ndarray, use_cuda: bool
     return tracks[0].cpu().numpy(), vis[0].cpu().numpy(), device
 
 
-def export_outputs(
-    outdir: Path,
-    video_path: Path,
-    frame_start: int,
-    point_names: List[str],
-    point_tracks: np.ndarray,
-    point_vis: np.ndarray,
-    scorer: str,
-    tool_box_tracks: Dict[str, np.ndarray],
-) -> None:
+def export_dlc_and_boxes(outdir: Path, video: Path, frame_start: int, point_names: List[str], point_tracks: np.ndarray, point_vis: np.ndarray, scorer: str, box_tracks: Dict[str, np.ndarray]) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     frames = np.arange(frame_start, frame_start + point_tracks.shape[0])
 
-    # DLC export
-    cols = []
-    for bp in point_names:
-        cols.extend([(scorer, bp, "x"), (scorer, bp, "y"), (scorer, bp, "likelihood")])
-    midx = pd.MultiIndex.from_tuples(cols, names=["scorer", "bodyparts", "coords"])
+    columns = []
+    for name in point_names:
+        columns.extend([(scorer, name, "x"), (scorer, name, "y"), (scorer, name, "likelihood")])
+    columns = pd.MultiIndex.from_tuples(columns, names=["scorer", "bodyparts", "coords"])
 
-    rows, idx = [], []
+    rows, index = [], []
     for i, fid in enumerate(frames):
-        r = []
+        row = []
         for j in range(len(point_names)):
-            r.extend([float(point_tracks[i, j, 0]), float(point_tracks[i, j, 1]), float(point_vis[i, j])])
-        rows.append(r)
-        idx.append(f"labeled-data/{video_path.stem}/img{fid:06d}.png")
+            row.extend([float(point_tracks[i, j, 0]), float(point_tracks[i, j, 1]), float(point_vis[i, j])])
+        rows.append(row)
+        index.append(f"labeled-data/{video.stem}/img{fid:06d}.png")
 
-    df = pd.DataFrame(rows, index=idx, columns=midx)
-    df.to_csv(outdir / f"{video_path.stem}_dlc_labels.csv")
-    df.to_hdf(outdir / f"{video_path.stem}_dlc_labels.h5", key="df_with_missing", mode="w")
+    df = pd.DataFrame(rows, index=index, columns=columns)
+    df.to_csv(outdir / f"{video.stem}_dlc_labels.csv")
+    df.to_hdf(outdir / f"{video.stem}_dlc_labels.h5", key="df_with_missing", mode="w")
 
-    # Tool box trajectories
     box_rows = []
     for i, fid in enumerate(frames):
-        for tool, corners in tool_box_tracks.items():
-            xs = corners[i, :, 0]
-            ys = corners[i, :, 1]
-            x1, y1, x2, y2 = float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
-            box_rows.append({"frame": int(fid), "tool": tool, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
-    pd.DataFrame(box_rows).to_csv(outdir / f"{video_path.stem}_tool_boxes.csv", index=False)
+        for tool, corners in box_tracks.items():
+            xs, ys = corners[i, :, 0], corners[i, :, 1]
+            box_rows.append({"frame": int(fid), "tool": tool, "x1": float(xs.min()), "y1": float(ys.min()), "x2": float(xs.max()), "y2": float(ys.max())})
+    pd.DataFrame(box_rows).to_csv(outdir / f"{video.stem}_tool_boxes.csv", index=False)
 
 
-def load_annotation_json(path: Path):
-    data = json.loads(path.read_text())
-    frame_start, frame_end = int(data["frame_start"]), int(data["frame_end"])
-    boxes = {k: tuple(v) for k, v in data["boxes"].items()}
-    points = [NamedPoint(name=p["name"], x=float(p["x"]), y=float(p["y"]), tool=p["tool"]) for p in data["points"]]
-    return frame_start, frame_end, boxes, points
+def cmd_annotate(args) -> None:
+    fc, w, h, fps = read_video_info(args.video)
+    print(f"Video: {args.video} | frames={fc} | size={w}x{h} | fps={fps:.2f}")
+    s, e = select_frame_range(args.video, fc)
+    first = load_video_range(args.video, s, s)[0]
+    boxes = select_tool_boxes(first)
+    points = select_points(first, boxes)
+    save_annotations(args.annotations_out, args.video, s, e, boxes, points)
+    print(f"Saved annotation bundle: {args.annotations_out}")
 
 
-def save_annotation_json(path: Path, frame_start: int, frame_end: int, boxes, points: List[NamedPoint]):
-    payload = {
-        "frame_start": int(frame_start),
-        "frame_end": int(frame_end),
-        "boxes": boxes,
-        "points": [{"name": p.name, "x": p.x, "y": p.y, "tool": p.tool} for p in points],
-    }
-    path.write_text(json.dumps(payload, indent=2))
+def cmd_track(args) -> None:
+    video, s, e, boxes, points = load_annotations(args.annotations_json)
+    if args.video is not None:
+        video = args.video
+    clip = load_video_range(video, s, e)
+
+    query_chunks = []
+    for _, box in boxes.items():
+        query_chunks.append(corners_from_box(box))
+    query_chunks.append(np.array([[p.x, p.y] for p in points], dtype=np.float32))
+    qxy = np.concatenate(query_chunks, axis=0)
+
+    tracks, vis, device = run_cotracker(clip, qxy, force_cpu=args.cpu)
+    print(f"Tracking complete on: {device}")
+
+    offset = 0
+    box_tracks: Dict[str, np.ndarray] = {}
+    for tool in boxes:
+        box_tracks[tool] = tracks[:, offset : offset + 4, :]
+        offset += 4
+    point_tracks, point_vis = tracks[:, offset:, :], vis[:, offset:]
+
+    export_dlc_and_boxes(
+        args.outdir,
+        video,
+        s,
+        [p.name for p in points],
+        point_tracks,
+        point_vis,
+        args.scorer,
+        box_tracks,
+    )
+    print(f"Outputs written to: {args.outdir}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Top-down CoTracker with local annotate + remote GPU tracking")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    p_ann = sub.add_parser("annotate", help="Local interactive GUI annotation only")
+    p_ann.add_argument("--video", type=Path, required=True)
+    p_ann.add_argument("--annotations-out", type=Path, required=True)
+    p_ann.set_defaults(func=cmd_annotate)
+
+    p_track = sub.add_parser("track", help="Headless tracking from annotation JSON (SLURM-ready)")
+    p_track.add_argument("--annotations-json", type=Path, required=True)
+    p_track.add_argument("--video", type=Path, default=None, help="Override video path in JSON")
+    p_track.add_argument("--outdir", type=Path, default=Path("outputs"))
+    p_track.add_argument("--scorer", type=str, default="cotracker")
+    p_track.add_argument("--cpu", action="store_true")
+    p_track.set_defaults(func=cmd_track)
+
+    return p
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Top-down CoTracker to DLC exporter")
-    ap.add_argument("--video", type=Path, required=True)
-    ap.add_argument("--outdir", type=Path, default=Path("outputs"))
-    ap.add_argument("--scorer", type=str, default="cotracker")
-    ap.add_argument("--annotation-json", type=Path, default=None, help="Predefined frame range, boxes, keypoints for non-interactive runs")
-    ap.add_argument("--save-annotation-json", type=Path, default=None, help="Where to save interactive selections")
-    ap.add_argument("--cpu", action="store_true")
-    args = ap.parse_args()
-
-    fc, w, h, fps = read_video_info(args.video)
-    print(f"Video {args.video} | frames={fc} | {w}x{h} | {fps:.2f}fps")
-
-    if args.annotation_json is not None:
-        frame_start, frame_end, boxes, points = load_annotation_json(args.annotation_json)
-    else:
-        frame_start, frame_end = select_frame_range(args.video, fc)
-        clip0 = load_video_range(args.video, frame_start, frame_start)[0]
-        boxes = select_tool_boxes(clip0)
-        points = select_tool_keypoints(clip0, boxes)
-        if args.save_annotation_json is not None:
-            save_annotation_json(args.save_annotation_json, frame_start, frame_end, boxes, points)
-            print(f"Saved annotations: {args.save_annotation_json}")
-
-    clip = load_video_range(args.video, frame_start, frame_end)
-
-    # top-down query set: first box corners, then keypoints
-    tool_corner_queries = {}
-    all_queries = []
-    for tool, box in boxes.items():
-        c = corners_from_box(box)
-        tool_corner_queries[tool] = c
-        all_queries.append(c)
-
-    keypoint_queries = np.array([[p.x, p.y] for p in points], dtype=np.float32)
-    all_queries.append(keypoint_queries)
-    qxy = np.concatenate(all_queries, axis=0)
-
-    tracks, vis, device = run_cotracker(clip, qxy, use_cuda=not args.cpu)
-    print(f"CoTracker completed on {device}")
-
-    # unpack tracks
-    offset = 0
-    tool_box_tracks: Dict[str, np.ndarray] = {}
-    for tool in boxes:
-        tool_box_tracks[tool] = tracks[:, offset : offset + 4, :]
-        offset += 4
-
-    point_tracks = tracks[:, offset:, :]
-    point_vis = vis[:, offset:]
-    point_names = [p.name for p in points]
-
-    export_outputs(
-        outdir=args.outdir,
-        video_path=args.video,
-        frame_start=frame_start,
-        point_names=point_names,
-        point_tracks=point_tracks,
-        point_vis=point_vis,
-        scorer=args.scorer,
-        tool_box_tracks=tool_box_tracks,
-    )
-
-    print("Done.")
+    parser = build_parser()
+    args = parser.parse_args()
+    args.func(args)
 
 
 if __name__ == "__main__":
