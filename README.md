@@ -5,6 +5,7 @@ This workflow is designed for your exact setup:
 - **GUI runs only on your local machine** (laptop/workstation).
 - You **copy annotation files + scripts to cluster**.
 - Cluster runs **headless tracking only** (no GUI calls).
+- You can now choose a **specific annotation frame** inside the selected frame range.
 
 ---
 
@@ -23,12 +24,19 @@ Box selection behavior:
 - Press `Enter` or `Space` to save.
 - `u` undo last ROI, `r` reset all ROIs.
 
+Annotation flow in order:
+1. Select frame range.
+2. Select the exact annotation frame within that range.
+3. Draw ROIs and pick keypoints on that chosen frame.
+
 ### B. Keypoint-only (no boxes)
 ```bash
 python cotracker_dlc_tool.py annotate \
   --video /local/path/endoscope_video.mp4 \
   --annotations-out /local/path/keypoints_annotations.json
 ```
+
+This mode also prompts for frame range first, then lets you choose the exact annotation frame.
 
 Outputs from this step are JSON files you can copy to cluster.
 

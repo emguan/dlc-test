@@ -43,6 +43,18 @@ def load_video_range(video_path: Path, start: int, end: int) -> np.ndarray:
     return np.stack(frames, axis=0)
 
 
+def load_single_frame(video_path: Path, frame_idx: int) -> np.ndarray:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        raise RuntimeError(f"Could not read frame {frame_idx}")
+    return frame
+
+
 def select_frame_range(video_path: Path, frame_count: int) -> Tuple[int, int]:
     cap = cv2.VideoCapture(str(video_path))
     win = "Keypoint-only: frame range (q/Enter confirm)"
@@ -71,6 +83,37 @@ def select_frame_range(video_path: Path, frame_count: int) -> Tuple[int, int]:
             cv2.destroyWindow(win)
             cap.release()
             return s, e
+
+
+def select_annotation_frame(video_path: Path, start: int, end: int) -> int:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    win = "Choose annotation frame (Enter/Space confirm)"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.createTrackbar("Frame", win, start, end, lambda _: None)
+
+    last = -1
+    while True:
+        fidx = cv2.getTrackbarPos("Frame", win)
+        if fidx != last:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+            ok, frame = cap.read()
+            if ok:
+                vis = frame.copy()
+                cv2.putText(vis, f"Annotation frame: {fidx}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                cv2.imshow(win, vis)
+            last = fidx
+
+        key = cv2.waitKey(30) & 0xFF
+        if key in (13, 32):
+            cv2.destroyWindow(win)
+            cap.release()
+            return fidx
+        if key == 27:
+            cv2.destroyWindow(win)
+            cap.release()
+            raise RuntimeError("Annotation frame selection aborted")
 
 
 def select_points(frame: np.ndarray) -> List[dict]:
@@ -105,22 +148,24 @@ def select_points(frame: np.ndarray) -> List[dict]:
             redraw()
 
 
-def save_annotations(path: Path, video: Path, start: int, end: int, points: List[dict]) -> None:
-    payload = {"video": str(video), "frame_start": start, "frame_end": end, "points": points}
+def save_annotations(path: Path, video: Path, start: int, end: int, annotation_frame: int, points: List[dict]) -> None:
+    payload = {"video": str(video), "frame_start": start, "frame_end": end, "annotation_frame": annotation_frame, "points": points}
     path.write_text(json.dumps(payload, indent=2))
 
 
 def load_annotations(path: Path):
     data = json.loads(path.read_text())
-    return Path(data["video"]), int(data["frame_start"]), int(data["frame_end"]), data["points"]
+    ann_frame = int(data.get("annotation_frame", data["frame_start"]))
+    return Path(data["video"]), int(data["frame_start"]), int(data["frame_end"]), ann_frame, data["points"]
 
 
-def run_cotracker(clip: np.ndarray, qxy: np.ndarray, force_cpu: bool):
+def run_cotracker(clip: np.ndarray, qxy: np.ndarray, query_t: int, force_cpu: bool):
     from cotracker.predictor import CoTrackerPredictor
 
     device = "cpu" if force_cpu else ("cuda" if torch.cuda.is_available() else "cpu")
     video = torch.from_numpy(clip[..., ::-1].copy()).permute(0, 3, 1, 2).unsqueeze(0).float().to(device)
-    queries = np.concatenate([np.zeros((qxy.shape[0], 1), dtype=np.float32), qxy], axis=1)
+    tcol = np.full((qxy.shape[0], 1), float(query_t), dtype=np.float32)
+    queries = np.concatenate([tcol, qxy], axis=1)
     queries = torch.from_numpy(queries).unsqueeze(0).to(device)
     model = CoTrackerPredictor().to(device)
     model.eval()
@@ -153,19 +198,23 @@ def cmd_annotate(args):
     fc, w, h, fps = read_video_info(args.video)
     print(f"Video: {args.video} | frames={fc} | size={w}x{h} | fps={fps:.2f}")
     s, e = select_frame_range(args.video, fc)
-    frame0 = load_video_range(args.video, s, s)[0]
+    ann_f = select_annotation_frame(args.video, s, e)
+    frame0 = load_single_frame(args.video, ann_f)
     points = select_points(frame0)
-    save_annotations(args.annotations_out, args.video, s, e, points)
+    save_annotations(args.annotations_out, args.video, s, e, ann_f, points)
     print(f"Saved annotations to {args.annotations_out}")
 
 
 def cmd_track(args):
-    video, s, e, points = load_annotations(args.annotations_json)
+    video, s, e, ann_f, points = load_annotations(args.annotations_json)
     if args.video is not None:
         video = args.video
     clip = load_video_range(video, s, e)
     qxy = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
-    tracks, vis, device = run_cotracker(clip, qxy, args.cpu)
+    query_t = ann_f - s
+    if query_t < 0 or query_t >= clip.shape[0]:
+        raise RuntimeError(f"annotation_frame={ann_f} is outside selected range [{s}, {e}]")
+    tracks, vis, device = run_cotracker(clip, qxy, query_t, args.cpu)
     print(f"Tracking finished on {device}")
     export_dlc(args.outdir, video, s, points, tracks, vis, args.scorer)
 
