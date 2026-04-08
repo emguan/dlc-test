@@ -108,6 +108,7 @@ On cluster runs, always pass `--video /cluster/path/video.mp4` (or use the SLURM
 - `<video>_dlc_labels.csv`
 - `<video>_dlc_labels.h5`
 - `<video>_tool_boxes.csv`
+- `<video>_dlc_point_mapping.json` (maps DLC bodypart label -> tool + original point name)
 
 ### Keypoint-only outputs
 - `<video>_dlc_labels.csv`
@@ -115,6 +116,11 @@ On cluster runs, always pass `--video /cluster/path/video.mp4` (or use the SLURM
 
 Both DLC label outputs use MultiIndex columns (`scorer/bodyparts/coords`) and frame index style:
 `labeled-data/<video_name>/imgXXXXXX.png`.
+
+Top-down ownership behavior:
+- Annotation JSON stores `tool` for every point.
+- DLC export encodes ownership in bodypart labels as `tool_left__name` / `tool_right__name`.
+- Duplicate names are allowed; duplicates are disambiguated with suffixes like `__dup2`.
 
 ---
 
@@ -127,4 +133,28 @@ config = "/path/to/config.yaml"
 deeplabcut.create_training_dataset(config)
 deeplabcut.train_network(config)
 deeplabcut.evaluate_network(config)
+```
+
+---
+
+## 8) Two-step top-down training (detector -> pose on crops)
+
+New files:
+- `train_two_step_dlc.py`
+- `run_two_step_dlc_train.slurm`
+
+Pipeline:
+1. Train detector on `*_tool_boxes.csv`.
+2. Train pose model on cropped detections using `*_dlc_labels.csv` (existing DLC-style labels).
+3. Inference mode runs detector first, then pose on crops.
+
+Cluster usage:
+
+```bash
+sbatch run_two_step_dlc_train.slurm \
+  /cluster/data/video.mp4 \
+  /cluster/labels/video_tool_boxes.csv \
+  /cluster/labels/video_dlc_labels.csv \
+  /cluster/work/twostep \
+  /cluster/dlc/config.yaml
 ```

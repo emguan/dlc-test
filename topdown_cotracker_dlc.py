@@ -321,19 +321,35 @@ def run_cotracker(clip_bgr: np.ndarray, qxy: np.ndarray, query_t: int, force_cpu
     return tracks[0].cpu().numpy(), vis[0].cpu().numpy(), device
 
 
-def export_dlc_and_boxes(outdir: Path, video: Path, frame_start: int, point_names: List[str], point_tracks: np.ndarray, point_vis: np.ndarray, scorer: str, box_tracks: Dict[str, np.ndarray]) -> None:
+def _build_dlc_bodypart_labels(points: List[NamedPoint]) -> List[str]:
+    """
+    Convert (tool, name) points to unique DLC bodypart labels while preserving ownership.
+    Allows duplicate point names across tools and within a tool.
+    """
+    labels: List[str] = []
+    seen: Dict[str, int] = {}
+    for p in points:
+        base = f"{p.tool}__{p.name}"
+        seen[base] = seen.get(base, 0) + 1
+        label = base if seen[base] == 1 else f"{base}__dup{seen[base]}"
+        labels.append(label)
+    return labels
+
+
+def export_dlc_and_boxes(outdir: Path, video: Path, frame_start: int, points: List[NamedPoint], point_tracks: np.ndarray, point_vis: np.ndarray, scorer: str, box_tracks: Dict[str, np.ndarray]) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     frames = np.arange(frame_start, frame_start + point_tracks.shape[0])
+    point_labels = _build_dlc_bodypart_labels(points)
 
     columns = []
-    for name in point_names:
+    for name in point_labels:
         columns.extend([(scorer, name, "x"), (scorer, name, "y"), (scorer, name, "likelihood")])
     columns = pd.MultiIndex.from_tuples(columns, names=["scorer", "bodyparts", "coords"])
 
     rows, index = [], []
     for i, fid in enumerate(frames):
         row = []
-        for j in range(len(point_names)):
+        for j in range(len(point_labels)):
             row.extend([float(point_tracks[i, j, 0]), float(point_tracks[i, j, 1]), float(point_vis[i, j])])
         rows.append(row)
         index.append(f"labeled-data/{video.stem}/img{fid:06d}.png")
@@ -341,6 +357,11 @@ def export_dlc_and_boxes(outdir: Path, video: Path, frame_start: int, point_name
     df = pd.DataFrame(rows, index=index, columns=columns)
     df.to_csv(outdir / f"{video.stem}_dlc_labels.csv")
     df.to_hdf(outdir / f"{video.stem}_dlc_labels.h5", key="df_with_missing", mode="w")
+    mapping = [
+        {"dlc_bodypart": point_labels[i], "tool": points[i].tool, "point_name": points[i].name}
+        for i in range(len(points))
+    ]
+    (outdir / f"{video.stem}_dlc_point_mapping.json").write_text(json.dumps(mapping, indent=2))
 
     box_rows = []
     for i, fid in enumerate(frames):
@@ -391,7 +412,7 @@ def cmd_track(args) -> None:
         args.outdir,
         video,
         s,
-        [ (p.tool + '_' + p.name)  for p in points],
+        points,
         point_tracks,
         point_vis,
         args.scorer,
