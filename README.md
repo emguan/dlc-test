@@ -23,9 +23,7 @@ wget https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth
 
 ### A. Top-down (2 tools: boxes first, then keypoints)
 ```bash
-python topdown_cotracker_dlc.py annotate \
-  --video /local/path/endoscope_video.mp4 \
-  --annotations-out /local/path/topdown_annotations.json
+python topdown_cotracker_dlc.py annotate --video ./video_data/left2_resized.mp4 --annotations-out ./annotations/left2_topdown_annotations.json
 ```
 
 Box selection behavior:
@@ -57,7 +55,7 @@ Outputs from this step are JSON files you can copy to cluster.
 Example with `scp`:
 
 ```bash
-scp topdown_cotracker_dlc.py run_topdown_cotracker.slurm /local/path/topdown_annotations.json user@cluster:/cluster/workdir/
+scp topdown_cotracker_dlc.py run_topdown_cotracker.slurm ./annotations/left2_topdown_annotations.json eguan3@dsailogin.arch.jhu.edu:/home/eguan3/dlc-test/
 ```
 
 Copy your video to cluster storage too (if not already present):
@@ -75,9 +73,10 @@ SSH to cluster, then:
 ```bash
 cd /cluster/workdir
 sbatch run_topdown_cotracker.slurm \
-  /cluster/data/endoscope_video.mp4 \
-  /cluster/workdir/topdown_annotations.json \
-  /cluster/workdir/outputs
+  ./video_data/left2_resized.mp4 \
+  ./left2_topdown_annotations.json \
+  ./CoTrackerOutputs/ \
+  Emily
 ```
 
 Optional scorer:
@@ -92,10 +91,10 @@ SCORER=surgeon1 sbatch run_topdown_cotracker.slurm ...
 
 ```bash
 python cotracker_dlc_tool.py track \
-  --annotations-json /cluster/workdir/keypoints_annotations.json \
-  --video /cluster/data/endoscope_video.mp4 \
-  --outdir /cluster/workdir/outputs \
-  --scorer surgeon1
+  --annotations-json ./left2_topdown_annotations.json \
+  ./video_data/left2_resized.mp4 \
+  --outdir ./CoTrackerOutputs/ \
+  --scorer Emily
 ```
 
 ---
@@ -157,13 +156,7 @@ New files:
 1) Create multi-animal project and generate `config.yaml`:
 
 ```bash
-python train_two_step_dlc.py init-project \
-  --project-name davinci_tools \
-  --experimenter your_name \
-  --videos /local/path/endoscope_video.mp4 \
-  --working-directory /local/path/dlc_projects \
-  --individuals tool_left tool_right \
-  --bodyparts tip jaw_left jaw_right shaft
+python train_two_step_dlc.py init-project  --project-name KBMT-test --experimenter Emily --videos ./video_data/left2_resized.mp4 --working-directory CoTrackerOutputs --individuals tool_left tool_right --bodyparts jaw1 jaw2 wrist1 wrist2 wrist3 shaft
 ```
 
 2) Extract frames:
