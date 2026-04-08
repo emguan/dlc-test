@@ -1,16 +1,18 @@
-# CoTracker → DeepLabCut exporter
+# Top-down CoTracker → DeepLabCut pipeline
 
-This repository includes an interactive script that helps you:
+This repo now supports a **top-down workflow** for your 2 identical DaVinci tools:
 
-1. Load an endoscope video.
-2. Manually choose a frame range to track.
-3. Manually click and name keypoints (e.g., matching points on identical DaVinci tools).
-4. Run CoTracker on the selected range.
-5. Export trajectories in a DeepLabCut-friendly format (`.csv` + `.h5`).
+1. Pick a frame range to track.
+2. Define one bounding box per tool (left/right).
+3. Define named keypoints per tool.
+4. Track both tool boxes and keypoints with CoTracker.
+5. Export DeepLabCut labels for training.
 
-## Script
+## Files
 
-- `cotracker_dlc_tool.py`
+- `topdown_cotracker_dlc.py` (main pipeline)
+- `run_topdown_cotracker.slurm` (SLURM submit script)
+- `cotracker_dlc_tool.py` (previous simpler interactive script)
 
 ## Install
 
@@ -19,48 +21,65 @@ pip install numpy pandas opencv-python torch
 pip install git+https://github.com/facebookresearch/co-tracker.git
 ```
 
-## Usage
+## Step A: Build / save annotations (interactive)
+
+Run this on a machine with display access:
 
 ```bash
-python cotracker_dlc_tool.py \
-  --video /path/to/endoscope_video.mp4 \
-  --outdir outputs \
-  --scorer surgeon1
+python topdown_cotracker_dlc.py \
+  --video /path/endoscope.mp4 \
+  --save-annotation-json /path/annotations.json \
+  --outdir /tmp/dry_run_outputs
 ```
 
-### Interactive controls
+This writes `annotations.json` containing:
+- `frame_start`, `frame_end`
+- `boxes` (`tool_left`, `tool_right`)
+- named keypoints (`name`, `x`, `y`, `tool`)
 
-#### 1) Frame range selector
-- Use `Start` and `End` trackbars.
-- `q` or `Enter`: confirm.
-- `Esc`: abort.
+## Step B: Run as SLURM job (non-interactive)
 
-#### 2) Keypoint selector
-- Left click a keypoint location.
-- Type a keypoint name in terminal prompt.
-- `u`: undo last point.
-- `q` or `Enter`: confirm (requires at least 1 keypoint).
-- `Esc`: abort.
+```bash
+sbatch run_topdown_cotracker.slurm \
+  /path/endoscope.mp4 \
+  /path/annotations.json \
+  /path/output_dir
+```
 
-## Output files
+Environment variable override:
 
-For input `video.mp4`, outputs are:
+```bash
+SCORER=surgeon1 sbatch run_topdown_cotracker.slurm ...
+```
 
-- `outputs/video_dlc_labels.csv`
-- `outputs/video_dlc_labels.h5`
-- `outputs/video_tracking_metadata.json`
+## Outputs
 
-The CSV/H5 use a MultiIndex column structure compatible with DeepLabCut conventions:
+For `video.mp4`, generated files include:
 
-- level 1: `scorer`
-- level 2: `bodyparts`
-- level 3: `coords` (`x`, `y`, `likelihood`)
+- `video_dlc_labels.csv` (DLC MultiIndex labels)
+- `video_dlc_labels.h5` (DLC `df_with_missing` table)
+- `video_tool_boxes.csv` (top-down tracked bounding boxes per frame/tool)
 
-Frame index names are written in DLC-like style:
+## Training DeepLabCut from this output
 
-- `labeled-data/<video_name>/img000123.png`
+1. Create a DLC project.
+2. Put your video frames under DLC `labeled-data/<video_name>/` if needed.
+3. Place the generated `*_dlc_labels.csv` (or `.h5`) into the project label structure.
+4. Ensure bodypart names match your intended keypoint schema.
+5. Run the normal DLC pipeline:
+
+```python
+import deeplabcut
+
+config = "/path/to/project/config.yaml"
+
+deeplabcut.create_training_dataset(config)
+deeplabcut.train_network(config)
+deeplabcut.evaluate_network(config)
+```
 
 ## Notes
 
-- CoTracker outputs visibility/confidence; this is exported as DLC `likelihood`.
-- If CUDA is unavailable or undesired, pass `--cpu`.
+- The top-down design is implemented by tracking **box corners first**, then keypoints.
+- Tool box trajectories are exported separately to `*_tool_boxes.csv`.
+- For SLURM jobs, use `--annotation-json` to avoid any GUI interaction.
