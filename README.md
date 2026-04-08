@@ -8,6 +8,16 @@ This workflow is designed for your exact setup:
 - You can now choose a **specific annotation frame** inside the selected frame range.
 
 ---
+# install
+```
+git clone https://github.com/facebookresearch/co-tracker.git
+cd co-tracker
+pip install -e .
+
+mkdir checkpoints
+cd checkpoints
+wget https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth
+```
 
 ## 1) Local machine: do interactive annotation
 
