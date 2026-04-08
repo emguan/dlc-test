@@ -1,0 +1,28 @@
+# Ignore all log files
+*.log
+
+# Ignore dependency directories
+video_data/
+venv/
+
+# Ignore compiled artifacts and build folders
+dist/
+build/
+*.exe
+*.o
+
+# Ignore environment variables and secrets
+.env
+.env.local
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore IDE settings
+.vscode/
+.idea/
+
+# Exception: ignore all .md files except README.md
+*.md
+!README.md

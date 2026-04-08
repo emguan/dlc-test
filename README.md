@@ -37,9 +37,7 @@ pip install git+https://github.com/facebookresearch/co-tracker.git
 Run on a machine with display (your laptop/workstation):
 
 ```bash
-python topdown_cotracker_dlc.py annotate \
-  --video /path/endoscope_video.mp4 \
-  --annotations-out /path/topdown_annotations.json
+python topdown_cotracker_dlc.py annotate --video ./video_data/left1_resized.mp4 --annotations-out ./annotations/left1_topdown_annotations.json
 ```
 
 What you do interactively:
@@ -52,24 +50,20 @@ This creates `topdown_annotations.json`.
 ## Step 3.2: Submit headless GPU tracking with SLURM
 
 ```bash
-sbatch run_topdown_cotracker.slurm \
-  /path/topdown_annotations.json \
-  /path/output_dir
+SCORER=emily sbatch run_topdown_cotracker.slurm ./annotations/left1_topdown_annotations.json /CoTrackerOutput/
 ```
 
 Optional video override (if cluster path differs from local path):
 
 ```bash
-sbatch run_topdown_cotracker.slurm \
-  /path/topdown_annotations.json \
-  /path/output_dir \
-  /cluster/path/endoscope_video.mp4
+SCORER=emily sbatch run_topdown_cotracker.slurm ./annotations/left1_topdown_annotations.json /CoTrackerOutput/
+  ./video_data/left1_resized.mp4 
 ```
 
 Optional scorer name:
 
 ```bash
-SCORER=surgeon1 sbatch run_topdown_cotracker.slurm ...
+SCORER=emily sbatch run_topdown_cotracker.slurm ...
 ```
 
 ---
