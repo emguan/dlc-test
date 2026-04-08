@@ -10,9 +10,15 @@
 
 set -euo pipefail
 
-# Usage (headless GPU job):
-# sbatch run_topdown_cotracker.slurm /cluster/path/video.mp4 /cluster/path/annotations.json /cluster/path/outdir
+# --- Activate venv ---
+source /home/eguan3/venvs/cotracker/bin/activate
 
+# Optional debug
+which python
+python --version
+python -c "import cv2; print('cv2 OK:', cv2.__version__)"
+
+# --- Inputs ---
 VIDEO_PATH="${1:?missing cluster video path}"
 ANNOT_JSON="${2:?missing annotations json}"
 OUTDIR="${3:?missing output dir}"

@@ -8,6 +8,16 @@ This workflow is designed for your exact setup:
 - You can now choose a **specific annotation frame** inside the selected frame range.
 
 ---
+# install
+```
+git clone https://github.com/facebookresearch/co-tracker.git
+cd co-tracker
+pip install -e .
+
+mkdir checkpoints
+cd checkpoints
+wget https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth
+```
 
 ## 1) Local machine: do interactive annotation
 
@@ -62,7 +72,7 @@ SSH to cluster, then:
 
 ```bash
 cd /cluster/workdir
-sbatch run_topdown_cotracker.slurm ./video_data/left2_resized.mp4 ./annotations/left2_topdown_annotations.json ./CoTrackerOutputs/
+sbatch run_topdown_cotracker.slurm ./video_data/left2_resized.mp4 ./left2_topdown_annotations.json ./CoTrackerOutputs/ Emily
 ```
 
 Optional scorer:
