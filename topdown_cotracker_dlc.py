@@ -54,6 +54,18 @@ def load_video_range(video_path: Path, start: int, end: int) -> np.ndarray:
     return np.stack(frames, axis=0)
 
 
+def load_single_frame(video_path: Path, frame_idx: int) -> np.ndarray:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        raise RuntimeError(f"Could not read frame {frame_idx}")
+    return frame
+
+
 def select_frame_range(video_path: Path, frame_count: int) -> Tuple[int, int]:
     cap = cv2.VideoCapture(str(video_path))
     window = "Top-down: select frame range (q/Enter confirm)"
@@ -91,6 +103,37 @@ def select_frame_range(video_path: Path, frame_count: int) -> Tuple[int, int]:
             raise RuntimeError("Aborted by user")
 
 
+def select_annotation_frame(video_path: Path, start: int, end: int) -> int:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    win = "Choose annotation frame (Enter/Space confirm)"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.createTrackbar("Frame", win, start, end, lambda _: None)
+
+    last = -1
+    while True:
+        fidx = cv2.getTrackbarPos("Frame", win)
+        if fidx != last:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+            ok, frame = cap.read()
+            if ok:
+                vis = frame.copy()
+                cv2.putText(vis, f"Annotation frame: {fidx}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                cv2.imshow(win, vis)
+            last = fidx
+
+        key = cv2.waitKey(30) & 0xFF
+        if key in (13, 32):
+            cv2.destroyWindow(win)
+            cap.release()
+            return fidx
+        if key == 27:
+            cv2.destroyWindow(win)
+            cap.release()
+            raise RuntimeError("Annotation frame selection aborted")
+
+
 def _draw_boxes(frame: np.ndarray, boxes: Dict[str, Tuple[float, float, float, float]]) -> np.ndarray:
     vis = frame.copy()
     colors = {"tool_left": (0, 255, 0), "tool_right": (0, 0, 255)}
@@ -105,31 +148,82 @@ def _draw_boxes(frame: np.ndarray, boxes: Dict[str, Tuple[float, float, float, f
 
 def select_tool_boxes(frame: np.ndarray) -> Dict[str, Tuple[float, float, float, float]]:
     """
-    Select two boxes and explicitly confirm them.
-    This avoids losing the selection if users miss selectROI key sequence.
+    Custom ROI picker:
+      - Click+drag to draw each ROI (on mouse release it is added).
+      - Press Enter or Space to save/confirm once 2 ROIs are present.
+      - Press u to undo last ROI.
+      - Press r to reset.
     """
+    rois: List[Tuple[float, float, float, float]] = []
+    drawing = {"active": False, "x0": 0, "y0": 0, "x1": 0, "y1": 0}
+    win = "Draw 2 ROIs | Enter/Space=save, u=undo, r=reset"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+
+    def redraw() -> None:
+        temp_boxes = {}
+        for i, (x, y, w, h) in enumerate(rois):
+            name = "tool_left" if i == 0 else "tool_right"
+            temp_boxes[name] = (x, y, w, h)
+        vis = _draw_boxes(frame, temp_boxes) if temp_boxes else frame.copy()
+
+        if drawing["active"]:
+            x0, y0, x1, y1 = drawing["x0"], drawing["y0"], drawing["x1"], drawing["y1"]
+            cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 255, 255), 2)
+
+        cv2.putText(
+            vis,
+            "Draw 2 boxes. Enter/Space=save, u=undo, r=reset",
+            (20, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+        )
+        cv2.imshow(win, vis)
+
+    def on_mouse(event, x, y, _flags, _param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            drawing["active"] = True
+            drawing["x0"], drawing["y0"] = x, y
+            drawing["x1"], drawing["y1"] = x, y
+            redraw()
+        elif event == cv2.EVENT_MOUSEMOVE and drawing["active"]:
+            drawing["x1"], drawing["y1"] = x, y
+            redraw()
+        elif event == cv2.EVENT_LBUTTONUP and drawing["active"]:
+            drawing["x1"], drawing["y1"] = x, y
+            drawing["active"] = False
+            x0, y0, x1, y1 = drawing["x0"], drawing["y0"], drawing["x1"], drawing["y1"]
+            x_min, x_max = sorted((x0, x1))
+            y_min, y_max = sorted((y0, y1))
+            w, h = x_max - x_min, y_max - y_min
+            if w >= 5 and h >= 5:
+                if len(rois) < 2:
+                    rois.append((float(x_min), float(y_min), float(w), float(h)))
+                else:
+                    print("Already have 2 ROIs. Press Enter/Space to save, or u/r to edit.")
+            redraw()
+
+    cv2.setMouseCallback(win, on_mouse)
+    redraw()
+
     while True:
-        cv2.namedWindow("Select 2 tool boxes", cv2.WINDOW_NORMAL)
-        rois = cv2.selectROIs("Select 2 tool boxes", frame, fromCenter=False, showCrosshair=True)
-        cv2.destroyWindow("Select 2 tool boxes")
-
-        if len(rois) != 2:
-            print(f"Expected exactly 2 boxes, got {len(rois)}. Please reselect.")
-            continue
-
-        boxes = {
-            "tool_left": tuple(float(v) for v in rois[0]),
-            "tool_right": tuple(float(v) for v in rois[1]),
-        }
-        preview = _draw_boxes(frame, boxes)
-        win = "Confirm boxes: c=confirm, r=reselect"
-        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-        cv2.imshow(win, preview)
-        key = cv2.waitKey(0) & 0xFF
-        cv2.destroyWindow(win)
-        if key == ord("c"):
-            return boxes
-        print("Reselecting boxes...")
+        key = cv2.waitKey(30) & 0xFF
+        if key in (13, 32):  # Enter or Space
+            if len(rois) == 2:
+                cv2.destroyWindow(win)
+                return {"tool_left": rois[0], "tool_right": rois[1]}
+            print(f"Need exactly 2 ROIs before save. Current: {len(rois)}")
+        elif key == ord("u"):
+            if rois:
+                rois.pop()
+                redraw()
+        elif key == ord("r"):
+            rois.clear()
+            redraw()
+        elif key == 27:
+            cv2.destroyWindow(win)
+            raise RuntimeError("ROI selection aborted by user")
 
 
 def _pick_points_tool(frame: np.ndarray, tool: str, box: Tuple[float, float, float, float], all_boxes: Dict[str, Tuple[float, float, float, float]]) -> List[NamedPoint]:
@@ -185,11 +279,12 @@ def select_points(frame: np.ndarray, boxes: Dict[str, Tuple[float, float, float,
     return pts
 
 
-def save_annotations(path: Path, video: Path, frame_start: int, frame_end: int, boxes, points: List[NamedPoint]) -> None:
+def save_annotations(path: Path, video: Path, frame_start: int, frame_end: int, annotation_frame: int, boxes, points: List[NamedPoint]) -> None:
     payload = {
         "video": str(video),
         "frame_start": int(frame_start),
         "frame_end": int(frame_end),
+        "annotation_frame": int(annotation_frame),
         "boxes": boxes,
         "points": [{"name": p.name, "x": p.x, "y": p.y, "tool": p.tool} for p in points],
     }
@@ -200,7 +295,8 @@ def load_annotations(path: Path):
     data = json.loads(path.read_text())
     boxes = {k: tuple(v) for k, v in data["boxes"].items()}
     points = [NamedPoint(name=p["name"], x=float(p["x"]), y=float(p["y"]), tool=p["tool"]) for p in data["points"]]
-    return Path(data["video"]), int(data["frame_start"]), int(data["frame_end"]), boxes, points
+    ann_frame = int(data.get("annotation_frame", data["frame_start"]))
+    return Path(data["video"]), int(data["frame_start"]), int(data["frame_end"]), ann_frame, boxes, points
 
 
 def corners_from_box(box: Tuple[float, float, float, float]) -> np.ndarray:
@@ -208,13 +304,14 @@ def corners_from_box(box: Tuple[float, float, float, float]) -> np.ndarray:
     return np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], dtype=np.float32)
 
 
-def run_cotracker(clip_bgr: np.ndarray, qxy: np.ndarray, force_cpu: bool) -> Tuple[np.ndarray, np.ndarray, str]:
+def run_cotracker(clip_bgr: np.ndarray, qxy: np.ndarray, query_t: int, force_cpu: bool) -> Tuple[np.ndarray, np.ndarray, str]:
     from cotracker.predictor import CoTrackerPredictor
 
     device = "cpu" if force_cpu else ("cuda" if torch.cuda.is_available() else "cpu")
     video_rgb = clip_bgr[..., ::-1].copy()
     video = torch.from_numpy(video_rgb).permute(0, 3, 1, 2).unsqueeze(0).float().to(device)
-    q = np.concatenate([np.zeros((qxy.shape[0], 1), dtype=np.float32), qxy], axis=1)
+    tcol = np.full((qxy.shape[0], 1), float(query_t), dtype=np.float32)
+    q = np.concatenate([tcol, qxy], axis=1)
     queries = torch.from_numpy(q).unsqueeze(0).to(device)
 
     model = CoTrackerPredictor().to(device)
@@ -257,15 +354,16 @@ def cmd_annotate(args) -> None:
     fc, w, h, fps = read_video_info(args.video)
     print(f"Video: {args.video} | frames={fc} | size={w}x{h} | fps={fps:.2f}")
     s, e = select_frame_range(args.video, fc)
-    first = load_video_range(args.video, s, s)[0]
-    boxes = select_tool_boxes(first)
-    points = select_points(first, boxes)
-    save_annotations(args.annotations_out, args.video, s, e, boxes, points)
+    ann_f = select_annotation_frame(args.video, s, e)
+    ann_img = load_single_frame(args.video, ann_f)
+    boxes = select_tool_boxes(ann_img)
+    points = select_points(ann_img, boxes)
+    save_annotations(args.annotations_out, args.video, s, e, ann_f, boxes, points)
     print(f"Saved annotation bundle: {args.annotations_out}")
 
 
 def cmd_track(args) -> None:
-    video, s, e, boxes, points = load_annotations(args.annotations_json)
+    video, s, e, ann_f, boxes, points = load_annotations(args.annotations_json)
     if args.video is not None:
         video = args.video
     clip = load_video_range(video, s, e)
@@ -276,7 +374,10 @@ def cmd_track(args) -> None:
     query_chunks.append(np.array([[p.x, p.y] for p in points], dtype=np.float32))
     qxy = np.concatenate(query_chunks, axis=0)
 
-    tracks, vis, device = run_cotracker(clip, qxy, force_cpu=args.cpu)
+    query_t = ann_f - s
+    if query_t < 0 or query_t >= clip.shape[0]:
+        raise RuntimeError(f"annotation_frame={ann_f} is outside selected range [{s}, {e}]")
+    tracks, vis, device = run_cotracker(clip, qxy, query_t=query_t, force_cpu=args.cpu)
     print(f"Tracking complete on: {device}")
 
     offset = 0
