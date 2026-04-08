@@ -8,14 +8,22 @@ This workflow is designed for your exact setup:
 - You can now choose a **specific annotation frame** inside the selected frame range.
 
 ---
+# install
+```
+git clone https://github.com/facebookresearch/co-tracker.git
+cd co-tracker
+pip install -e .
+
+mkdir checkpoints
+cd checkpoints
+wget https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth
+```
 
 ## 1) Local machine: do interactive annotation
 
 ### A. Top-down (2 tools: boxes first, then keypoints)
 ```bash
-python topdown_cotracker_dlc.py annotate \
-  --video /local/path/endoscope_video.mp4 \
-  --annotations-out /local/path/topdown_annotations.json
+python topdown_cotracker_dlc.py annotate --video ./video_data/left2_resized.mp4 --annotations-out ./annotations/left2_topdown_annotations.json
 ```
 
 Box selection behavior:
@@ -47,7 +55,7 @@ Outputs from this step are JSON files you can copy to cluster.
 Example with `scp`:
 
 ```bash
-scp topdown_cotracker_dlc.py run_topdown_cotracker.slurm /local/path/topdown_annotations.json user@cluster:/cluster/workdir/
+scp topdown_cotracker_dlc.py run_topdown_cotracker.slurm ./annotations/left2_topdown_annotations.json eguan3@dsailogin.arch.jhu.edu:/home/eguan3/dlc-test
 ```
 
 Copy your video to cluster storage too (if not already present):
@@ -64,10 +72,7 @@ SSH to cluster, then:
 
 ```bash
 cd /cluster/workdir
-sbatch run_topdown_cotracker.slurm \
-  /cluster/data/endoscope_video.mp4 \
-  /cluster/workdir/topdown_annotations.json \
-  /cluster/workdir/outputs
+sbatch run_topdown_cotracker.slurm ./video_data/left2_resized.mp4 ./left2_topdown_annotations.json ./CoTrackerOutputs/ Emily
 ```
 
 Optional scorer:
