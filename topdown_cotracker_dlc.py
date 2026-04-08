@@ -391,7 +391,7 @@ def cmd_track(args) -> None:
         args.outdir,
         video,
         s,
-        [p.name for p in points],
+        [ (p.tool + '_' + p.name)  for p in points],
         point_tracks,
         point_vis,
         args.scorer,
