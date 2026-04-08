@@ -23,7 +23,9 @@ wget https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth
 
 ### A. Top-down (2 tools: boxes first, then keypoints)
 ```bash
-python topdown_cotracker_dlc.py annotate --video ./video_data/left2_resized.mp4 --annotations-out ./annotations/left2_topdown_annotations.json
+python topdown_cotracker_dlc.py annotate \
+  --video /local/path/endoscope_video.mp4 \
+  --annotations-out /local/path/topdown_annotations.json
 ```
 
 Box selection behavior:
@@ -55,7 +57,7 @@ Outputs from this step are JSON files you can copy to cluster.
 Example with `scp`:
 
 ```bash
-scp topdown_cotracker_dlc.py run_topdown_cotracker.slurm ./annotations/left2_topdown_annotations.json eguan3@dsailogin.arch.jhu.edu:/home/eguan3/dlc-test
+scp topdown_cotracker_dlc.py run_topdown_cotracker.slurm /local/path/topdown_annotations.json user@cluster:/cluster/workdir/
 ```
 
 Copy your video to cluster storage too (if not already present):
@@ -72,7 +74,10 @@ SSH to cluster, then:
 
 ```bash
 cd /cluster/workdir
-sbatch run_topdown_cotracker.slurm ./video_data/left2_resized.mp4 ./left2_topdown_annotations.json ./CoTrackerOutputs/ Emily
+sbatch run_topdown_cotracker.slurm \
+  /cluster/data/endoscope_video.mp4 \
+  /cluster/workdir/topdown_annotations.json \
+  /cluster/workdir/outputs
 ```
 
 Optional scorer:
@@ -137,24 +142,68 @@ deeplabcut.evaluate_network(config)
 
 ---
 
-## 8) Two-step top-down training (detector -> pose on crops)
+## 8) Two-step top-down training in DLC (multi-animal, no YOLO)
+
+Use a DLC multi-animal project where:
+- `individuals = tool_left tool_right`
+- `multianimalbodyparts = your keypoints` (same points for both identical tools)
 
 New files:
-- `train_two_step_dlc.py`
-- `run_two_step_dlc_train.slurm`
+- `train_two_step_dlc.py` (DLC-only helper)
+- `run_two_step_dlc_train.slurm` (cluster training job)
 
-Pipeline:
-1. Train detector on `*_tool_boxes.csv`.
-2. Train pose model on cropped detections using `*_dlc_labels.csv` (existing DLC-style labels).
-3. Inference mode runs detector first, then pose on crops.
+### Step A (local, GUI): create project + labels
 
-Cluster usage:
+1) Create multi-animal project and generate `config.yaml`:
 
 ```bash
-sbatch run_two_step_dlc_train.slurm \
-  /cluster/data/video.mp4 \
-  /cluster/labels/video_tool_boxes.csv \
-  /cluster/labels/video_dlc_labels.csv \
-  /cluster/work/twostep \
-  /cluster/dlc/config.yaml
+python train_two_step_dlc.py init-project \
+  --project-name davinci_tools \
+  --experimenter your_name \
+  --videos /local/path/endoscope_video.mp4 \
+  --working-directory /local/path/dlc_projects \
+  --individuals tool_left tool_right \
+  --bodyparts tip jaw_left jaw_right shaft
+```
+
+2) Extract frames:
+
+```bash
+python train_two_step_dlc.py extract-frames --config /local/path/.../config.yaml
+```
+
+3) Label in DLC GUI:
+
+```bash
+python train_two_step_dlc.py label-gui --config /local/path/.../config.yaml
+```
+
+4) Optional label check:
+
+```bash
+python train_two_step_dlc.py check-labels --config /local/path/.../config.yaml
+```
+
+### Step B (cluster, headless GPU): train using existing config.yaml
+
+Copy the entire DLC project folder (including labeled data + `config.yaml`) to cluster, then:
+
+```bash
+sbatch run_two_step_dlc_train.slurm /cluster/path/to/config.yaml
+```
+
+This SLURM job runs:
+1) `create-trainset`
+2) `train`
+3) `evaluate`
+
+### Inference (detector proposes boxes, pose predicts keypoints)
+
+Run DLC inference on new videos:
+
+```bash
+python train_two_step_dlc.py analyze \
+  --config /cluster/path/to/config.yaml \
+  --videos /cluster/data/new_video.mp4 \
+  --save-as-csv
 ```
